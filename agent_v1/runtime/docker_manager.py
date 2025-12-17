@@ -1,12 +1,8 @@
 import subprocess
 from typing import Optional, Dict
 
-from agent_v1.runtime.registry import (
-    runtime_registry,
-    ProjectRuntime,
-    RuntimeAlreadyExists,
-)
 from agent_v1.api.project_utils import resolve_project_dir
+from agent_v1.runtime.repository import RuntimeRepository, RuntimeNotFound
 
 
 class DockerError(Exception):
@@ -15,17 +11,17 @@ class DockerError(Exception):
 
 class DockerManager:
     """
-    Manages Docker container lifecycle per project.
-    No command execution here – lifecycle only.
+    Docker lifecycle manager.
+    Async-safe. DB is the source of truth.
     """
 
     DEFAULT_IMAGE = "python:3.11-slim"
     WORKDIR = "/workspace"
 
+    def __init__(self):
+        self.repo = RuntimeRepository()
+
     def _run(self, args: list[str]) -> str:
-        """
-        Executes a docker CLI command safely (no shell).
-        """
         try:
             result = subprocess.run(
                 ["docker", *args],
@@ -37,100 +33,78 @@ class DockerManager:
         except subprocess.CalledProcessError as e:
             raise DockerError(e.stderr.strip() or str(e))
 
+    # -------------------------
+    # Docker inspection
+    # -------------------------
+
     def container_exists(self, name: str) -> bool:
-        output = self._run(
+        return self._run(
             ["ps", "-a", "--filter", f"name=^{name}$", "--format", "{{.Names}}"]
-        )
-        return output == name
+        ) == name
 
     def is_running(self, name: str) -> bool:
-        output = self._run(
+        return self._run(
             ["ps", "--filter", f"name=^{name}$", "--format", "{{.Names}}"]
-        )
-        return output == name
+        ) == name
 
-    def create_container(
+    # -------------------------
+    # Lifecycle
+    # -------------------------
+
+    async def create_container(
         self,
         project_name: str,
         image: Optional[str] = None,
         ports: Optional[Dict[int, int]] = None,
-    ) -> ProjectRuntime:
-        """
-        Creates (but does not start) a container for a project.
-        """
+    ):
         project_dir = resolve_project_dir(project_name)
         image = image or self.DEFAULT_IMAGE
         container_name = f"ai_builder_{project_name}"
 
-        if runtime_registry.exists(project_name):
-            raise RuntimeAlreadyExists(
-                f"Runtime already registered for project: {project_name}"
-            )
-
-        # Build docker run args
-        run_args = [
-            "create",
-            "--name",
-            container_name,
-            "-w",
-            self.WORKDIR,
-            "-v",
-            f"{project_dir}:{self.WORKDIR}",
-        ]
-
-        if ports:
-            for host_port, container_port in ports.items():
-                run_args.extend(["-p", f"{host_port}:{container_port}"])
-
-        run_args.append(image)
-        run_args.append("sleep")
-        run_args.append("infinity")
-
-        self._run(run_args)
-
-        runtime = runtime_registry.create(
+        await self.repo.create(
             project_name=project_name,
             project_root=str(project_dir),
             image=image,
+            container_name=container_name,
         )
-        runtime.container_id = container_name
 
-        return runtime
+        args = [
+            "create",
+            "--name", container_name,
+            "-w", self.WORKDIR,
+            "-v", f"{project_dir}:{self.WORKDIR}",
+            image,
+            "sleep", "infinity",
+        ]
 
-    def start_container(self, project_name: str) -> ProjectRuntime:
-        runtime = runtime_registry.get(project_name)
+        self._run(args)
 
-        if not runtime.container_id:
-            raise DockerError("Container not created")
+    async def start_container(self, project_name: str):
+        runtime = await self.repo.get(project_name)
 
-        if self.is_running(runtime.container_id):
-            return runtime
+        if self.is_running(runtime.container_name):
+            return
 
-        self._run(["start", runtime.container_id])
-        runtime.mark_running(runtime.container_id)
-        return runtime
+        self._run(["start", runtime.container_name])
 
-    def stop_container(self, project_name: str):
-        runtime = runtime_registry.get(project_name)
+        await self.repo.update_status(project_name, "running")
 
-        if not runtime.container_id:
-            raise DockerError("Container not created")
+    async def stop_container(self, project_name: str):
+        runtime = await self.repo.get(project_name)
 
-        if self.is_running(runtime.container_id):
-            self._run(["stop", runtime.container_id])
-            runtime.mark_stopped()
+        if self.is_running(runtime.container_name):
+            self._run(["stop", runtime.container_name])
+            await self.repo.update_status(project_name, "stopped")
 
-    def remove_container(self, project_name: str):
-        runtime = runtime_registry.get(project_name)
+    async def remove_container(self, project_name: str):
+        runtime = await self.repo.get(project_name)
 
-        if runtime.container_id and self.container_exists(runtime.container_id):
-            if self.is_running(runtime.container_id):
-                self._run(["stop", runtime.container_id])
+        if self.container_exists(runtime.container_name):
+            if self.is_running(runtime.container_name):
+                self._run(["stop", runtime.container_name])
+            self._run(["rm", runtime.container_name])
 
-            self._run(["rm", runtime.container_id])
-
-        runtime_registry.remove(project_name)
+        await self.repo.delete(project_name)
 
 
-# Singleton
 docker_manager = DockerManager()

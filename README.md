@@ -14,3 +14,10 @@
 |   12 | Runtime Cleanup Job                      | Periodic cleanup of orphaned containers                               | Low      |
 |   13 | DB Migrations Strategy                   | Introduce Aerich for schema migrations                                | Low      |
 |   14 | Admin Runtime Dashboard APIs             | List all runtimes, status, health                                     | Low      |
+
+1. check the all api's working or not for both container and runtime process including ws
+2. dont keep static in dropdown for running commands keep it open for all 
+3. always make the ws logs coming no disconnection instead of pure rest make it as ws so that it will be proper interactive 
+based on proper research only 
+4. then make sure to get understand the all the project details each and very bit and bytes in depth 
+5. then plan for integrating in the web clearly with file editing options saving and all 

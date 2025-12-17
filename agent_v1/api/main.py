@@ -12,11 +12,16 @@ from agent_v1.api.schemas import (
 from agent_v1.api.project_utils import resolve_project_dir, GENERATED_PROJECTS_ROOT
 from agent_v1.tools.filesystem import set_project_root, list_files, read_file
 from agent_v1.api.runtime_routes import router as runtime_router
-from agent_v1.api.db.config import init_db, close_db
+from agent_v1.api.db.config import init_db
+from agent_v1.runtime.runtime_ws import router as runtime_ws_router
+
+
 app = FastAPI(
     title="AI Project Builder API",
     version="1.0.0"
 )
+
+init_db(app)
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,15 +32,7 @@ app.add_middleware(
 )
 
 app.include_router(runtime_router)
-
-@app.on_event("startup")
-async def startup_event():
-    await init_db()
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    await close_db()
+app.include_router(runtime_ws_router)
 
 @app.get("/health")
 def health_check():

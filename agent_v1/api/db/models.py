@@ -35,6 +35,11 @@ class ProjectRuntime(Model):
         null=True
     )
 
+    process_status = fields.CharField(
+        max_length=20,
+        default="stopped"  # running | stopped
+    )
+
     created_at = fields.DatetimeField(
         auto_now_add=True
     )

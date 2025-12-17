@@ -1,9 +1,8 @@
 import subprocess
 from typing import List, Optional, Dict, Tuple
 
-from agent_v1.runtime.command_policy import validate_command, CommandRejected
-from agent_v1.runtime.registry import runtime_registry, RuntimeNotFound
-from agent_v1.runtime.docker_manager import docker_manager, DockerError
+from agent_v1.runtime.command_policy import validate_command
+from agent_v1.runtime.repository import RuntimeRepository, RuntimeNotFound
 
 
 class ExecutionError(Exception):
@@ -12,10 +11,14 @@ class ExecutionError(Exception):
 
 class CommandExecutor:
     """
-    Executes validated commands inside a project's Docker container.
+    Executes short-lived commands inside Docker containers.
+    Async-safe. PostgreSQL is the source of truth.
     """
 
-    def exec(
+    def __init__(self):
+        self.repo = RuntimeRepository()
+
+    async def exec(
         self,
         project_name: str,
         command: str,
@@ -24,16 +27,10 @@ class CommandExecutor:
         timeout: int = 60,
         env: Optional[Dict[str, str]] = None,
     ) -> Tuple[int, str, str]:
-        """
-        Execute a command inside the project's container.
 
-        Returns:
-            (return_code, stdout, stderr)
-        """
-
-        # 1. Validate runtime
+        # 1. Load runtime from DB
         try:
-            runtime = runtime_registry.get(project_name)
+            runtime = await self.repo.get(project_name)
         except RuntimeNotFound as e:
             raise ExecutionError(str(e))
 
@@ -42,39 +39,28 @@ class CommandExecutor:
                 f"Runtime is not running for project: {project_name}"
             )
 
-        if not runtime.container_id:
-            raise ExecutionError("Container ID not available")
-
-        # 2. Validate command against policy
-        try:
-            validate_command(command, args, cwd)
-        except CommandRejected as e:
-            raise ExecutionError(f"Command rejected: {str(e)}")
+        # 2. Validate command
+        validate_command(command, args, cwd)
 
         # 3. Build docker exec command (NO SHELL)
-        docker_cmd = [
-            "docker",
-            "exec",
-        ]
+        docker_cmd = ["docker", "exec"]
 
         if env:
             for k, v in env.items():
                 docker_cmd.extend(["-e", f"{k}={v}"])
 
-        CONTAINER_WORKDIR = "/workspace"
+        workdir = (
+            "/workspace"
+            if cwd in (None, ".")
+            else f"/workspace/{cwd.lstrip('/')}"
+        )
+        docker_cmd.extend(["-w", workdir])
 
-        if cwd:
-            if cwd == ".":
-                abs_cwd = CONTAINER_WORKDIR
-            else:
-                abs_cwd = f"{CONTAINER_WORKDIR}/{cwd.lstrip('/')}"
-            docker_cmd.extend(["-w", abs_cwd])
-
-        docker_cmd.append(runtime.container_id)
+        docker_cmd.append(runtime.container_name)
         docker_cmd.append(command)
         docker_cmd.extend(args)
 
-        # 4. Execute
+        # 4. Execute command
         try:
             result = subprocess.run(
                 docker_cmd,
@@ -87,10 +73,9 @@ class CommandExecutor:
         except Exception as e:
             raise ExecutionError(str(e))
 
-        # 5. Record execution
-        runtime.record_command(
-            " ".join([command] + args)
-        )
+        # 5. Persist last command
+        full_command = " ".join([command] + args)
+        await self.repo.update_last_command(project_name, full_command)
 
         return (
             result.returncode,
